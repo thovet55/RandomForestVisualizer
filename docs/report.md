@@ -14,11 +14,11 @@ https://github.com/thovet55/RandomForestVisualizer
 
 ### 逐帧动画页面
 
-![Frame Animation](C:/Users/zmx05/OneDrive/文档/College/26spring/数算/assignmentP/RandomForestVisualizer/docs/screenshots/frame_animation.png)
+![Frame Animation](https://raw.githubusercontent.com/thovet55/Gallery/main/frame_animation.png)
 
 ### 最终投票结果
 
-![Voting Result](C:/Users/zmx05/OneDrive/文档/College/26spring/数算/assignmentP/RandomForestVisualizer/docs/screenshots/voting_result.png)
+![Voting Result](https://raw.githubusercontent.com/thovet55/Gallery/main/voting_result.png)
 
 ## README 预览
 
