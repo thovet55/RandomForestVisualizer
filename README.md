@@ -146,12 +146,10 @@ RandomForestVisualizer/
 ├── docs/
 ├── src/
 │   ├── __init__.py
-│   ├── data_utils.py
 │   ├── decision_tree.py
 │   ├── metrics.py
-│   ├── random_forest.py
-│   ├── tree_node.py
-│   └── visualization_events.py
+│   ├── random_forest.py 
+│   └── tree_node.py
 ├── app.py
 ├── main.py
 ├── README.md
@@ -191,11 +189,6 @@ src/random_forest.py
 
 从零实现 Random Forest 分类器，包括 Bootstrap 采样、多棵决策树训练、随机特征选择和多数投票预测。
 
-```
-src/data_utils.py
-```
-
-提供数据生成和数据处理相关工具函数。
 
 ```
 src/metrics.py
@@ -203,12 +196,6 @@ src/metrics.py
 
 提供模型评估相关函数，例如 accuracy 计算。
 
-
-```
-src/visualization_events.py
-```
-
-保存算法可视化事件相关的数据结构和工具函数，用于支持逐步展示算法过程。
 
 ```
 docs/
