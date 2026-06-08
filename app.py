@@ -3,7 +3,7 @@ Streamlit app: 自实现 Random Forest 全流程可视化器。
 
 功能：
 1. 自己生成 two-moons 风格二维分类数据；
-2. 自己实现 Decision Tree 和 Random Forest；
+2. 从 src 调用自己实现的 Decision Tree 和 Random Forest；
 3. 用动画展示建树、森林边界和多树投票；
 4. 在 Streamlit 中用上一帧 / 下一帧按钮逐帧展示完整动画。
 
@@ -16,13 +16,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 from matplotlib.animation import FuncAnimation, PillowWriter
+
+from src.decision_tree import DecisionTreeClassifier
+from src.random_forest import RandomForestClassifier
+from src.tree_node import TreeNode
 
 
 # ============================================================
@@ -81,353 +84,8 @@ def make_two_moons(
 
 
 # ============================================================
-# 2. 自己实现 Decision Tree 和 Random Forest，不调用 sklearn
+# 2. 模型实现从 src 导入，app.py 只保留界面和可视化逻辑
 # ============================================================
-
-
-@dataclass
-class TreeNode:
-    """A node in a binary decision tree."""
-
-    node_id: int
-    depth: int
-    prediction: int
-    gini: float
-    num_samples: int
-    class_counts: Dict[int, int]
-    feature_index: Optional[int] = None
-    threshold: Optional[float] = None
-    left: Optional["TreeNode"] = None
-    right: Optional["TreeNode"] = None
-    is_leaf: bool = False
-
-
-class CustomDecisionTreeClassifier:
-    """
-    A small Decision Tree classifier implemented from scratch.
-
-    The tree uses Gini impurity and recursively chooses the split with the
-    smallest weighted impurity. At each node, max_features controls how many
-    randomly selected features may be considered, matching Random Forest logic.
-    """
-
-    def __init__(
-        self,
-        max_depth: int = 3,
-        min_samples_split: int = 2,
-        max_features: Optional[Union[int, str]] = None,
-        random_state: int = 0,
-    ) -> None:
-        self.max_depth = max_depth
-        self.min_samples_split = min_samples_split
-        self.max_features = max_features
-        self.random_state = random_state
-
-        self.root: Optional[TreeNode] = None
-        self.classes_: Optional[np.ndarray] = None
-        self.n_features_: Optional[int] = None
-        self._rng: Optional[np.random.Generator] = None
-        self._next_node_id = 0
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "CustomDecisionTreeClassifier":
-        X, y = self._validate_X_y(X, y)
-        self.classes_ = np.unique(y)
-        self.n_features_ = X.shape[1]
-        self._rng = np.random.default_rng(self.random_state)
-        self._next_node_id = 0
-        self.root = self._build_tree(X, y, depth=0)
-        return self
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        if self.root is None:
-            raise RuntimeError("The tree has not been fitted yet.")
-        X = np.asarray(X, dtype=float)
-        if X.ndim == 1:
-            X = X.reshape(1, -1)
-        return np.array([self.predict_one(row) for row in X], dtype=int)
-
-    def predict_one(self, x: np.ndarray) -> int:
-        prediction, _ = self.predict_one_with_path(x)
-        return int(prediction)
-
-    def predict_one_with_path(self, x: np.ndarray) -> Tuple[int, List[Dict[str, object]]]:
-        if self.root is None:
-            raise RuntimeError("The tree has not been fitted yet.")
-
-        x = np.asarray(x, dtype=float).reshape(-1)
-        node = self.root
-        path: List[Dict[str, object]] = []
-
-        while node is not None:
-            step: Dict[str, object] = {
-                "node_id": node.node_id,
-                "depth": node.depth,
-                "feature_index": node.feature_index,
-                "threshold": node.threshold,
-                "prediction": node.prediction,
-                "gini": node.gini,
-                "num_samples": node.num_samples,
-                "class_counts": dict(node.class_counts),
-                "is_leaf": node.is_leaf,
-            }
-
-            if node.is_leaf:
-                path.append(step)
-                return int(node.prediction), path
-
-            assert node.feature_index is not None
-            assert node.threshold is not None
-
-            if x[node.feature_index] <= node.threshold:
-                step["direction"] = "left"
-                path.append(step)
-                node = node.left
-            else:
-                step["direction"] = "right"
-                path.append(step)
-                node = node.right
-
-        raise RuntimeError("Invalid tree structure: prediction path ended early.")
-
-    def _build_tree(self, X: np.ndarray, y: np.ndarray, depth: int) -> TreeNode:
-        node = TreeNode(
-            node_id=self._new_node_id(),
-            depth=depth,
-            prediction=self._majority_class(y),
-            gini=self._gini(y),
-            num_samples=len(y),
-            class_counts=self._class_counts(y),
-        )
-
-        should_stop = (
-            depth >= self.max_depth
-            or len(y) < self.min_samples_split
-            or node.gini == 0.0
-        )
-
-        if should_stop:
-            node.is_leaf = True
-            return node
-
-        split = self._best_split(X, y)
-        if split is None:
-            node.is_leaf = True
-            return node
-
-        feature_index, threshold, left_mask, right_mask = split
-        node.feature_index = int(feature_index)
-        node.threshold = float(threshold)
-        node.left = self._build_tree(X[left_mask], y[left_mask], depth + 1)
-        node.right = self._build_tree(X[right_mask], y[right_mask], depth + 1)
-        return node
-
-    def _best_split(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-    ) -> Optional[Tuple[int, float, np.ndarray, np.ndarray]]:
-        feature_indices = self._select_candidate_features()
-        best_impurity = np.inf
-        best_result: Optional[Tuple[int, float, np.ndarray, np.ndarray]] = None
-
-        for feature_index in feature_indices:
-            values = np.unique(X[:, feature_index])
-            if len(values) <= 1:
-                continue
-
-            values = np.sort(values)
-            thresholds = (values[:-1] + values[1:]) / 2.0
-
-            for threshold in thresholds:
-                left_mask = X[:, feature_index] <= threshold
-                right_mask = ~left_mask
-
-                if not left_mask.any() or not right_mask.any():
-                    continue
-
-                impurity = self._weighted_gini(y[left_mask], y[right_mask])
-
-                if impurity < best_impurity:
-                    best_impurity = impurity
-                    best_result = (
-                        int(feature_index),
-                        float(threshold),
-                        left_mask,
-                        right_mask,
-                    )
-
-        return best_result
-
-    def _select_candidate_features(self) -> np.ndarray:
-        assert self.n_features_ is not None
-        assert self._rng is not None
-
-        if self.max_features is None:
-            k = self.n_features_
-        elif self.max_features == "sqrt":
-            k = max(1, int(np.sqrt(self.n_features_)))
-        elif self.max_features == "log2":
-            k = max(1, int(np.log2(self.n_features_)))
-        else:
-            k = int(self.max_features)
-            k = max(1, min(k, self.n_features_))
-
-        return self._rng.choice(self.n_features_, size=k, replace=False)
-
-    def _new_node_id(self) -> int:
-        node_id = self._next_node_id
-        self._next_node_id += 1
-        return node_id
-
-    def _majority_class(self, y: np.ndarray) -> int:
-        labels, counts = np.unique(y, return_counts=True)
-        max_count = counts.max()
-        winners = labels[counts == max_count]
-        return int(np.min(winners))
-
-    def _class_counts(self, y: np.ndarray) -> Dict[int, int]:
-        labels, counts = np.unique(y, return_counts=True)
-        return {int(label): int(count) for label, count in zip(labels, counts)}
-
-    def _gini(self, y: np.ndarray) -> float:
-        if len(y) == 0:
-            return 0.0
-        _, counts = np.unique(y, return_counts=True)
-        probabilities = counts / len(y)
-        return float(1.0 - np.sum(probabilities ** 2))
-
-    def _weighted_gini(self, y_left: np.ndarray, y_right: np.ndarray) -> float:
-        total = len(y_left) + len(y_right)
-        return float(
-            (len(y_left) / total) * self._gini(y_left)
-            + (len(y_right) / total) * self._gini(y_right)
-        )
-
-    def _validate_X_y(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y, dtype=int)
-
-        if X.ndim != 2:
-            raise ValueError("X must be a two-dimensional array.")
-        if y.ndim != 1:
-            raise ValueError("y must be a one-dimensional array.")
-        if len(X) != len(y):
-            raise ValueError("X and y must contain the same number of samples.")
-        if len(X) == 0:
-            raise ValueError("X and y cannot be empty.")
-        if self.max_depth < 1:
-            raise ValueError("max_depth must be at least 1.")
-        if self.min_samples_split < 2:
-            raise ValueError("min_samples_split must be at least 2.")
-
-        return X, y
-
-
-class CustomRandomForestClassifier:
-    """A Random Forest classifier implemented from scratch."""
-
-    def __init__(
-        self,
-        n_trees: int = 9,
-        max_depth: int = 3,
-        min_samples_split: int = 2,
-        max_features: Optional[Union[int, str]] = 1,
-        random_state: int = 7,
-    ) -> None:
-        self.n_trees = n_trees
-        self.max_depth = max_depth
-        self.min_samples_split = min_samples_split
-        self.max_features = max_features
-        self.random_state = random_state
-
-        self.trees: List[CustomDecisionTreeClassifier] = []
-        self.bootstrap_indices: List[np.ndarray] = []
-        self.classes_: Optional[np.ndarray] = None
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "CustomRandomForestClassifier":
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y, dtype=int)
-
-        if X.ndim != 2:
-            raise ValueError("X must be a two-dimensional array.")
-        if y.ndim != 1:
-            raise ValueError("y must be a one-dimensional array.")
-        if len(X) != len(y):
-            raise ValueError("X and y must contain the same number of samples.")
-        if self.n_trees < 1:
-            raise ValueError("n_trees must be at least 1.")
-
-        rng = np.random.default_rng(self.random_state)
-        self.classes_ = np.unique(y)
-        self.trees = []
-        self.bootstrap_indices = []
-
-        for tree_index in range(self.n_trees):
-            bootstrap_indices = rng.choice(
-                np.arange(len(X)),
-                size=len(X),
-                replace=True,
-            )
-            X_bootstrap = X[bootstrap_indices]
-            y_bootstrap = y[bootstrap_indices]
-
-            tree = CustomDecisionTreeClassifier(
-                max_depth=self.max_depth,
-                min_samples_split=self.min_samples_split,
-                max_features=self.max_features,
-                random_state=100 + tree_index,
-            )
-            tree.fit(X_bootstrap, y_bootstrap)
-
-            self.trees.append(tree)
-            self.bootstrap_indices.append(bootstrap_indices)
-
-        return self
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        X = np.asarray(X, dtype=float)
-        if X.ndim == 1:
-            X = X.reshape(1, -1)
-        return np.array([self.predict_one(row) for row in X], dtype=int)
-
-    def predict_one(self, x: np.ndarray) -> int:
-        details = self.predict_one_with_votes(x)
-        return int(details["final_prediction"])
-
-    def predict_one_with_votes(self, x: np.ndarray) -> Dict[str, object]:
-        if not self.trees:
-            raise RuntimeError("The forest has not been fitted yet.")
-
-        tree_predictions: List[int] = []
-        tree_paths: List[List[Dict[str, object]]] = []
-
-        for tree in self.trees:
-            prediction, path = tree.predict_one_with_path(x)
-            tree_predictions.append(int(prediction))
-            tree_paths.append(path)
-
-        vote_counts = self._vote_counts(tree_predictions)
-        final_prediction = self._majority_vote(tree_predictions)
-
-        return {
-            "tree_predictions": tree_predictions,
-            "tree_paths": tree_paths,
-            "vote_counts": vote_counts,
-            "final_prediction": int(final_prediction),
-        }
-
-    def _vote_counts(self, predictions: Iterable[int]) -> Dict[int, int]:
-        counts: Dict[int, int] = {}
-        for prediction in predictions:
-            prediction = int(prediction)
-            counts[prediction] = counts.get(prediction, 0) + 1
-        return counts
-
-    def _majority_vote(self, predictions: Iterable[int]) -> int:
-        counts = self._vote_counts(predictions)
-        max_count = max(counts.values())
-        winners = [label for label, count in counts.items() if count == max_count]
-        return int(min(winners))
 
 
 # ============================================================
@@ -439,8 +97,8 @@ class CustomRandomForestClassifier:
 class DemoState:
     X: np.ndarray
     y: np.ndarray
-    forest: CustomRandomForestClassifier
-    tree1_build_models: List[CustomDecisionTreeClassifier]
+    forest: RandomForestClassifier
+    tree1_build_models: List[DecisionTreeClassifier]
     new_sample: np.ndarray
     tree_votes_for_new_sample: np.ndarray
     final_vote_counts: np.ndarray
@@ -466,6 +124,20 @@ FEATURE_NAMES = ["Feature 1", "Feature 2"]
 CLASS_NAMES = ["Class 0", "Class 1"]
 
 
+def normalize_max_features(
+    max_features: Union[int, str, None],
+    n_features: int,
+) -> Optional[int]:
+    """Convert sidebar max_features options into the integer format used by src."""
+    if max_features is None:
+        return None
+    if max_features == "sqrt":
+        return max(1, int(np.sqrt(n_features)))
+    if max_features == "log2":
+        return max(1, int(np.log2(n_features)))
+    return int(max_features)
+
+
 def build_demo_state(
     n_samples: int,
     noise: float,
@@ -484,12 +156,13 @@ def build_demo_state(
         noise=noise,
         random_state=data_seed,
     )
+    model_max_features = normalize_max_features(max_features, n_features=X.shape[1])
 
-    forest = CustomRandomForestClassifier(
+    forest = RandomForestClassifier(
         n_trees=n_trees,
         max_depth=max_depth,
         min_samples_split=min_samples_split,
-        max_features=max_features,
+        max_features=model_max_features,
         random_state=forest_seed,
     )
     forest.fit(X, y)
@@ -498,13 +171,19 @@ def build_demo_state(
     X_tree1_bootstrap = X[tree1_bootstrap_indices]
     y_tree1_bootstrap = y[tree1_bootstrap_indices]
 
-    tree1_build_models: List[CustomDecisionTreeClassifier] = []
+    tree1_random_state = (
+        forest.tree_random_states[0]
+        if getattr(forest, "tree_random_states", None)
+        else forest_seed
+    )
+
+    tree1_build_models: List[DecisionTreeClassifier] = []
     for depth in range(1, max_depth + 1):
-        model = CustomDecisionTreeClassifier(
+        model = DecisionTreeClassifier(
             max_depth=depth,
             min_samples_split=min_samples_split,
-            max_features=max_features,
-            random_state=100,
+            max_features=model_max_features,
+            random_state=tree1_random_state,
         )
         model.fit(X_tree1_bootstrap, y_tree1_bootstrap)
         tree1_build_models.append(model)
@@ -525,7 +204,7 @@ def build_demo_state(
     )
 
     final_vote_counts = np.bincount(tree_votes_for_new_sample, minlength=2)
-    final_prediction = int(np.argmax(final_vote_counts))
+    final_prediction = int(forest.predict_one(new_sample[0]))
     prob_class_0 = float(final_vote_counts[0] / n_trees)
     prob_class_1 = float(final_vote_counts[1] / n_trees)
 
@@ -564,7 +243,7 @@ def build_demo_state(
 def draw_boundary(
     ax: plt.Axes,
     demo: DemoState,
-    model_or_predictor: Union[CustomDecisionTreeClassifier, CustomRandomForestClassifier, Callable[[np.ndarray], np.ndarray]],
+    model_or_predictor: Union[DecisionTreeClassifier, RandomForestClassifier, Callable[[np.ndarray], np.ndarray]],
     title: str,
 ) -> None:
     """Draw a model's decision boundary on the two-dimensional grid."""
@@ -592,7 +271,7 @@ def draw_boundary(
 
 def draw_tree_structure(
     ax: plt.Axes,
-    tree: CustomDecisionTreeClassifier,
+    tree: DecisionTreeClassifier,
     title: str,
 ) -> None:
     """
