@@ -149,7 +149,6 @@ RandomForestVisualizer/
 │   ├── data_utils.py
 │   ├── decision_tree.py
 │   ├── metrics.py
-│   ├── plot_utils.py
 │   ├── random_forest.py
 │   ├── tree_node.py
 │   └── visualization_events.py
@@ -204,11 +203,6 @@ src/metrics.py
 
 提供模型评估相关函数，例如 accuracy 计算。
 
-```
-src/plot_utils.py
-```
-
-提供 Matplotlib / Graphviz 相关绘图函数，用于展示数据集、树结构、分类边界、预测路径和投票过程。
 
 ```
 src/visualization_events.py
