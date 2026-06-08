@@ -13,6 +13,7 @@ Streamlit app: 自实现 Random Forest 全流程可视化器。
 """
 
 from __future__ import annotations
+import tempfile
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,6 +99,7 @@ class DemoState:
     X: np.ndarray
     y: np.ndarray
     forest: RandomForestClassifier
+    bootstrap_indices: List[np.ndarray]
     tree1_build_models: List[DecisionTreeClassifier]
     new_sample: np.ndarray
     tree_votes_for_new_sample: np.ndarray
@@ -217,6 +219,7 @@ def build_demo_state(
         X=X,
         y=y,
         forest=forest,
+        bootstrap_indices=forest.bootstrap_indices,
         tree1_build_models=tree1_build_models,
         new_sample=new_sample,
         tree_votes_for_new_sample=tree_votes_for_new_sample,
@@ -243,10 +246,15 @@ def build_demo_state(
 def draw_boundary(
     ax: plt.Axes,
     demo: DemoState,
-    model_or_predictor: Union[DecisionTreeClassifier, RandomForestClassifier, Callable[[np.ndarray], np.ndarray]],
+    model_or_predictor: Union[
+        DecisionTreeClassifier,
+        RandomForestClassifier,
+        Callable[[np.ndarray], np.ndarray],
+    ],
     title: str,
+    bootstrap_indices: Optional[np.ndarray] = None,
 ) -> None:
-    """Draw a model's decision boundary on the two-dimensional grid."""
+    """Draw a model's decision boundary and optionally highlight bootstrap samples."""
     if callable(model_or_predictor) and not hasattr(model_or_predictor, "predict"):
         Z = model_or_predictor(demo.grid)
     else:
@@ -255,18 +263,72 @@ def draw_boundary(
     Z = np.asarray(Z).reshape(demo.xx.shape)
 
     ax.contourf(demo.xx, demo.yy, Z, alpha=0.35)
-    ax.scatter(
-        demo.X[:, 0],
-        demo.X[:, 1],
-        c=demo.y,
-        edgecolor="k",
-        s=35,
-    )
+
+    if bootstrap_indices is None:
+        ax.scatter(
+            demo.X[:, 0],
+            demo.X[:, 1],
+            c=demo.y,
+            edgecolor="k",
+            s=35,
+            alpha=0.9,
+            label="Training data",
+        )
+    else:
+        sample_counts = np.bincount(bootstrap_indices, minlength=len(demo.X))
+        selected_mask = sample_counts > 0
+        oob_mask = ~selected_mask
+
+        if np.any(oob_mask):
+            ax.scatter(
+                demo.X[oob_mask, 0],
+                demo.X[oob_mask, 1],
+                c=demo.y[oob_mask],
+                edgecolor="none",
+                s=28,
+                alpha=0.18,
+                marker="o",
+                label="OOB / not selected",
+            )
+
+        point_sizes = 35 + 28 * sample_counts[selected_mask]
+        ax.scatter(
+            demo.X[selected_mask, 0],
+            demo.X[selected_mask, 1],
+            c=demo.y[selected_mask],
+            edgecolor="k",
+            s=point_sizes,
+            alpha=0.9,
+            marker="o",
+            label="Bootstrap samples",
+        )
+
+        duplicated_count = int(np.sum(sample_counts > 1))
+        oob_count = int(np.sum(oob_mask))
+        ax.text(
+            0.02,
+            0.98,
+            f"Bootstrap unique: {int(np.sum(selected_mask))}/{len(demo.X)}\n"
+            f"OOB: {oob_count}\n"
+            f"Duplicated points: {duplicated_count}",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            bbox={
+                "boxstyle": "round",
+                "facecolor": "white",
+                "edgecolor": "gray",
+                "alpha": 0.85,
+            },
+        )
+
     ax.set_xlim(demo.x_min, demo.x_max)
     ax.set_ylim(demo.y_min, demo.y_max)
     ax.set_xlabel("Feature 1")
     ax.set_ylabel("Feature 2")
     ax.set_title(title)
+    ax.legend(loc="lower right", fontsize=8)
 
 
 def draw_tree_structure(
@@ -452,7 +514,9 @@ def render_animation_frame(demo: DemoState, frame: int, fig: Optional[plt.Figure
             demo,
             current_tree,
             f"Tree 1 Decision Boundary, depth = {depth}",
+            bootstrap_indices=demo.bootstrap_indices[0],
         )
+
         fig.suptitle("Stage 1: Building Tree 1", fontsize=15)
 
     elif frame < demo.phase_1_frames + demo.phase_2_frames:
@@ -472,7 +536,9 @@ def render_animation_frame(demo: DemoState, frame: int, fig: Optional[plt.Figure
             demo,
             current_tree,
             f"Decision Boundary of Tree {tree_idx + 1}",
+            bootstrap_indices=demo.bootstrap_indices[tree_idx],
         )
+
         fig.suptitle("Stage 2: Showing All Trees in the Forest", fontsize=15)
 
     else:
@@ -503,7 +569,9 @@ def render_animation_frame(demo: DemoState, frame: int, fig: Optional[plt.Figure
                 demo,
                 current_tree,
                 f"Boundary of Voting Tree {current_tree_idx + 1}",
+                bootstrap_indices=demo.bootstrap_indices[current_tree_idx],
             )
+
         else:
             votes_so_far = demo.tree_votes_for_new_sample
             current_title = f"Final RF Prediction: Class {demo.final_prediction}"
@@ -552,6 +620,16 @@ def save_animation_gif(demo: DemoState, output_path: Union[str, Path], fps: int 
     plt.close(fig)
     return output_path
 
+def render_animation_gif_bytes(demo: DemoState, fps: int = 1) -> bytes:
+    """Render the complete animation to GIF bytes for Streamlit download."""
+    with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as temp_file:
+        output_path = Path(temp_file.name)
+
+    try:
+        save_animation_gif(demo, output_path, fps=fps)
+        return output_path.read_bytes()
+    finally:
+        output_path.unlink(missing_ok=True)
 
 def format_terminal_output(demo: DemoState) -> str:
     """Return a concise Chinese voting summary."""
@@ -655,7 +733,9 @@ def main() -> None:
             st.session_state.gif_bytes = None
             st.session_state.current_frame = 0
 
-    tab_principle, tab_animation = st.tabs(["RF 原理", "逐帧动画"])
+    tab_principle, tab_animation, tab_download = st.tabs(
+        ["RF 原理", "逐帧动画", "GIF 下载"]
+    )
 
     with tab_principle:
         st.subheader("Random Forest 的核心思想")
@@ -684,55 +764,92 @@ def main() -> None:
         demo: Optional[DemoState] = st.session_state.demo
         if demo is None:
             st.info("请先在左侧点击 **训练并生成逐帧动画**。")
-            return
-
-        st.success(
-            f"模型已训练完成：{demo.n_trees} 棵树，最大深度 {demo.max_depth}，"
-            f"动画共 {demo.total_frames} 帧。"
-        )
-
-        st.session_state.current_frame = max(
-            0,
-            min(int(st.session_state.current_frame), demo.total_frames - 1),
-        )
-
-        left_button, frame_info, right_button = st.columns([1, 2, 1])
-
-        with left_button:
-            if st.button(
-                "⬅️ 上一帧",
-                use_container_width=True,
-                disabled=st.session_state.current_frame <= 0,
-            ):
-                st.session_state.current_frame -= 1
-                st.rerun()
-
-        with frame_info:
-            st.markdown(
-                f"<div style='text-align:center; font-size:18px;'>"
-                f"当前帧：{st.session_state.current_frame + 1} / {demo.total_frames}"
-                f"</div>",
-                unsafe_allow_html=True,
+        else:
+            st.success(
+                f"模型已训练完成：{demo.n_trees} 棵树，最大深度 {demo.max_depth}，"
+                f"动画共 {demo.total_frames} 帧。"
             )
 
-        with right_button:
-            if st.button(
-                "下一帧 ➡️",
-                use_container_width=True,
-                disabled=st.session_state.current_frame >= demo.total_frames - 1,
-            ):
-                st.session_state.current_frame += 1
-                st.rerun()
+            st.session_state.current_frame = max(
+                0,
+                min(int(st.session_state.current_frame), demo.total_frames - 1),
+            )
 
-        current_figure = render_animation_frame(
-            demo,
-            st.session_state.current_frame,
-        )
-        st.pyplot(current_figure)
-        plt.close(current_figure)
+            left_button, frame_info, right_button = st.columns([1, 2, 1])
 
-        st.subheader("最终投票结果")
-        st.code(format_terminal_output(demo), language="text")
+            with left_button:
+                if st.button(
+                        "⬅️ 上一帧",
+                        use_container_width=True,
+                        disabled=st.session_state.current_frame <= 0,
+                ):
+                    st.session_state.current_frame -= 1
+                    st.rerun()
+
+            with frame_info:
+                st.markdown(
+                    f"<div style='text-align:center; font-size:18px;'>"
+                    f"当前帧：{st.session_state.current_frame + 1} / {demo.total_frames}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            with right_button:
+                if st.button(
+                        "下一帧 ➡️",
+                        use_container_width=True,
+                        disabled=st.session_state.current_frame >= demo.total_frames - 1,
+                ):
+                    st.session_state.current_frame += 1
+                    st.rerun()
+
+            current_figure = render_animation_frame(
+                demo,
+                st.session_state.current_frame,
+            )
+            st.pyplot(current_figure)
+            plt.close(current_figure)
+
+            st.subheader("最终投票结果")
+            st.code(format_terminal_output(demo), language="text")
+
+    with tab_download:
+        demo: Optional[DemoState] = st.session_state.demo
+        if demo is None:
+            st.info("请先在左侧点击 **训练并生成逐帧动画**，然后再生成 GIF。")
+        else:
+            st.subheader("下载完整 GIF 动画")
+            st.write(
+                f"当前动画共 {demo.total_frames} 帧。生成 GIF 可能需要一些时间，"
+                "帧数越多、网格精度越高，生成越慢。"
+            )
+
+            gif_fps = st.slider("GIF 播放速度 FPS", 1, 5, 1, 1)
+
+            if st.button("生成 GIF", use_container_width=True):
+                with st.spinner("正在生成 GIF，请稍候..."):
+                    st.session_state.gif_bytes = render_animation_gif_bytes(
+                        demo,
+                        fps=int(gif_fps),
+                    )
+                    st.session_state.gif_name = "rf_classification_full_process.gif"
+                st.success("GIF 已生成，可以下载。")
+
+            if st.session_state.gif_bytes is None:
+                st.info("点击上方按钮生成 GIF。")
+            else:
+                st.download_button(
+                    label="下载 GIF",
+                    data=st.session_state.gif_bytes,
+                    file_name=st.session_state.gif_name,
+                    mime="image/gif",
+                    use_container_width=True,
+                )
+                st.image(st.session_state.gif_bytes, caption="GIF 预览")
+
+            st.subheader("最终投票结果")
+            st.code(format_terminal_output(demo), language="text")
+
 
 if __name__ == "__main__":
     main()
