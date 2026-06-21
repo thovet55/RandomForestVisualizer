@@ -8,7 +8,6 @@ Streamlit app: 自实现 Random Forest 全流程可视化器。
 4. 在 Streamlit 中用上一帧 / 下一帧按钮逐帧展示完整动画。
 
 运行：
-    .venv\\Scripts\\Activate.ps1
     streamlit run app.py
 """
 
