@@ -8,6 +8,7 @@ Streamlit app: 自实现 Random Forest 全流程可视化器。
 4. 在 Streamlit 中用上一帧 / 下一帧按钮逐帧展示完整动画。
 
 运行：
+    .venv\\Scripts\\Activate.ps1
     streamlit run app.py
 """
 
@@ -26,6 +27,7 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 from src.decision_tree import DecisionTreeClassifier
 from src.random_forest import RandomForestClassifier
 from src.tree_node import TreeNode
+from src.metrics import accuracy_score
 
 
 # ============================================================
@@ -106,6 +108,8 @@ class DemoState:
     final_prediction: int
     prob_class_0: float
     prob_class_1: float
+    forest_accuracy: float
+    mean_tree_accuracy: float
     xx: np.ndarray
     yy: np.ndarray
     grid: np.ndarray
@@ -199,15 +203,31 @@ def build_demo_state(
     grid = np.c_[xx.ravel(), yy.ravel()]
 
     new_sample = np.array([[new_sample_x, new_sample_y]], dtype=float)
+
+    # 直接调用 src 中 RandomForest 的投票接口，避免在 app 里重复实现
+    # 逐棵树预测、多数投票和最终预测逻辑（predict_one_with_votes 内部
+    # 已经处理了平票规则，与 forest.predict_one 完全一致）。
+    vote_result = forest.predict_one_with_votes(new_sample[0])
+
     tree_votes_for_new_sample = np.array(
-        [tree.predict(new_sample)[0] for tree in forest.trees],
+        vote_result["tree_predictions"],
         dtype=int,
     )
+    final_prediction = int(vote_result["final_prediction"])
 
-    final_vote_counts = np.bincount(tree_votes_for_new_sample, minlength=2)
-    final_prediction = int(forest.predict_one(new_sample[0]))
+    vote_counts = vote_result["vote_counts"]
+    final_vote_counts = np.array(
+        [vote_counts.get(0, 0), vote_counts.get(1, 0)],
+        dtype=int,
+    )
     prob_class_0 = float(final_vote_counts[0] / n_trees)
     prob_class_1 = float(final_vote_counts[1] / n_trees)
+
+    # 在训练集上评估模型表现：森林整体准确率，以及单棵树的平均准确率，
+    # 用于直观展示“多棵树投票”通常不低于“单棵树”的水平。
+    forest_accuracy = accuracy_score(y, forest.predict(X))
+    tree_accuracies = [accuracy_score(y, tree.predict(X)) for tree in forest.trees]
+    mean_tree_accuracy = float(np.mean(tree_accuracies))
 
     phase_1_frames = max_depth
     phase_2_frames = n_trees
@@ -226,6 +246,8 @@ def build_demo_state(
         final_prediction=final_prediction,
         prob_class_0=prob_class_0,
         prob_class_1=prob_class_1,
+        forest_accuracy=forest_accuracy,
+        mean_tree_accuracy=mean_tree_accuracy,
         xx=xx,
         yy=yy,
         grid=grid,
@@ -649,6 +671,10 @@ def format_terminal_output(demo: DemoState) -> str:
             "估计类别概率：",
             f"P(类别 0) = {demo.prob_class_0:.2f}",
             f"P(类别 1) = {demo.prob_class_1:.2f}",
+            "",
+            "训练集准确率：",
+            f"随机森林：{demo.forest_accuracy:.2%}",
+            f"单棵树平均：{demo.mean_tree_accuracy:.2%}",
         ]
     )
     return "\n".join(lines)
@@ -767,6 +793,20 @@ def main() -> None:
             st.success(
                 f"模型已训练完成：{demo.n_trees} 棵树，最大深度 {demo.max_depth}，"
                 f"动画共 {demo.total_frames} 帧。"
+            )
+
+            accuracy_col_forest, accuracy_col_tree = st.columns(2)
+            accuracy_col_forest.metric(
+                "随机森林训练准确率",
+                f"{demo.forest_accuracy:.2%}",
+            )
+            accuracy_col_tree.metric(
+                "单棵树平均准确率",
+                f"{demo.mean_tree_accuracy:.2%}",
+            )
+            st.caption(
+                "以上为训练集准确率。随机森林通常不低于单棵树的平均水平，"
+                "这正体现了多棵树投票带来的稳定性提升。"
             )
 
             st.session_state.current_frame = max(
